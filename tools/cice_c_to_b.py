@@ -1,6 +1,7 @@
-# This script creates the CICE grid files based on a ROMS gridfile
+# This script creates a CICE B grid from a ROMS C grid
 # Created by Sebastian Maartensson around 2014/2015
 # Edit by nilsmk@met.no 21.08.2019
+# Further edited by Dylan Schlichting, Oct 2025
 
 import sys
 import os
@@ -62,8 +63,8 @@ if __name__ == "__main__":
     eta_t_var = new_grid.createVariable('eta_t', 'f4', ('eta_t',))
     eta_u_var = new_grid.createVariable('eta_u', 'f4', ('eta_u',))
 
-    xi_t_var[:] = ROMSGrid.variables['xi_rho']
-    eta_t_var[:] = ROMSGrid.variables['eta_rho']
+    xi_t_var[:] = ROMSGrid.variables['xi_rho'][:]
+    eta_t_var[:] = ROMSGrid.variables['eta_rho'][:]
     xi_u_var[:] = get_xi_u(ROMSGrid = ROMSGrid)
     eta_u_var[:] = get_eta_u(ROMSGrid = ROMSGrid)
 
@@ -106,8 +107,8 @@ if __name__ == "__main__":
     eta_ha_var = kmt_grid.createVariable('eta_ha', 'f4', ('eta_ha',))
     kmt = kmt_grid.createVariable('kmt', 'f4', ('eta_ha','xi_ha'))
 
-    xi_ha_var[:] = ROMSGrid.variables['xi_rho']
-    eta_ha_var[:] = ROMSGrid.variables['eta_rho']
-    kmt[:] = ROMSGrid.variables['mask_rho']
+    xi_ha_var[:] = ROMSGrid.variables['xi_rho'][:]
+    eta_ha_var[:] = ROMSGrid.variables['eta_rho'][:]
+    kmt[:] = ROMSGrid.variables['mask_rho'][:]
 
     kmt_grid.close()

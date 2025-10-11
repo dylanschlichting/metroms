@@ -1,3 +1,5 @@
+# Adds mask to CICE grid from ROMS grid file
+# Modified by Dylan Schlichting, Oct 2025.
 import netCDF4
 import sys
 
