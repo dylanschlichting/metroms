@@ -1,5 +1,83 @@
-# Have I ever told you the definition of insanity???
-# To do - update time, documentation, and general code quality
+# ===================================================================================
+# Generates CICE boundary condition files for Beaufort Sea ROMS-CICE coupling
+# Loosely based on cice_bry from Metroms tools. Code relies on existence of
+# ROMS boundary files with sea ice variables because we intended to run the 
+# ROMS Budgell sea ice model, but as of 10/2025 it lacks proper open boundary 
+# conditions and nudging support. Otherwise, HYCOM or other data/model output 
+# would need to be interpolated onto the ROMS grid first.
+# ==============================================================
+# Date: Oct/Nov 2025
+# Authors: Dylan Schlichting & Brianna Undzis, LANL
+# ==============================================================
+# Based on Sec. 2.2.2 of Duarte et al. (2022) GMD,
+# https://gmd.copernicus.org/articles/15/4373/2022/
+# ==============================================================
+# CICE requires the following boundary variables: 
+# ==============================================
+# Sinz - ice salinity profile, 4D (Time, ncat, nkice, eta_t/xi_t)
+# Sthk - ice thickness, 4D (Time, ncat, nkice, eta_t/xi_t)
+# Uice - ice velocity (u-component), 4D (Time, ncat, nkice, eta_t/xi_t)
+# Vice - ice velocity (v-component), 4D (Time, ncat, nkice, eta_t/xi_t)
+# Tinz - ice internal temperature profile, 4D (Time, ncat, nkice, eta_t/xi_t)
+# Tsfc - ice surface temperature, 4D (Time, ncat, nkice, eta_t/xi_t)
+# aicen - ice concentration in each thickness category, 4D (Time, ncat, nkice, eta_t/xi_t)
+# alvln - ice albedo, 4D (Time, ncat, nkice, eta_t/xi_t)
+# apondn - melt pond area fraction, 4D (Time, ncat, nkice, eta_t/xi_t)
+# hbrine - brine layer thickness, 4D (Time, ncat, nkice, eta_t/xi_t)
+# hpondn - melt pond thickness, 4D (Time, ncat, nkice, eta_t/xi_t)
+# 
+# Missing data (most of it!):
+# - No data available for ice or snow internal/surface temperatures
+# - No data available for ice salinity
+# - No data on ice thickness categories
+# 
+# Assumptions and Procedures, docs below quoted directly or paraphrased 
+# from Duarte et al. (2022):
+# 
+# 1. **Boundary Data Interpolation:**
+#    - TOPAZ values along domain boundaries are linearly interpolated to the grid.
+#
+# 2. **Ice Category Variables:**
+#    - Ice category-dependent variables are stored in boundary files.
+#    - Assumed five categories for ice thickness based on available data.
+#    - For each grid point, all values are set to zero except for the category 
+#      corresponding to the "bulk" ice thickness.
+#
+# 3. **Surface Snow/Ice Temperatures:**
+#    - In the absence of snow, surface (skin) temperature is set to the air 
+#      temperature from atmospheric forcing files when air temperature is < 0°C.
+#    - Otherwise, surface temperature is set to a slightly negative value (-0.00001°C).
+#
+# 4. **Inner Snow and Ice Temperatures:**
+#    - Linearly interpolate between surface temperature and freezing water temperature.
+#    - Same temperature trend is applied to both snow and ice layers.
+#    - Snow height is considered when snow is present, affecting ice layer thickness.
+#
+# 5. **Inner Ice Salinity:**
+#    - Salinity is calculated based on ice thickness, distinguishing between
+#      multi-year ice (MYI) and first-year ice (FYI) using established profiles.
+#    - MYI (ice thickness > 1.5 m) follows profiles from Hunke et al. (2015), 
+#      while FYI (ice thickness ≤ 1.5 m) uses the "C"-shaped profile described in 
+#      Gerland et al. (1999) (Eq. 1):
+#
+#      Si = 19.539 * Zi^2 - 19.93 * Zi + 8.913 
+#      
+#      Where:
+#      Si = salinity of layer i
+#      Zi = fractional depth of layer i (0 at the ice top, 1 at the ice bottom)
+#       
+#     On the Alaskan Beaufort shelf, multiyear ice is assumed to be negligible, but can 
+#     can exceed 1.5 m thick, so we use Eqn 1. 
+#
+# Other notes:
+# - Time still has to be formatted. I think CICE time in days and maybe can't handle 
+# multiyear file? Idk
+# - This script could be modified to have certain CICE variables like snow layers
+# or ice categories be inputs, but premature optimization is the root of all evil! 
+# - There are almost certainly mistakes here, do NOT treat this code as a black box!
+# - For data where we have no info about ice categories, we distribute them uniformally
+# This applies to everything except ice thickness and concentration, which come from HYCOM!
+# ===================================================================================
 import os
 import glob
 import shutil
@@ -11,6 +89,7 @@ import datetime as dt
 import xarray as xr
 from collections import OrderedDict as odict
 import warnings
+import matplotlib.pyplot as plt
 warnings.filterwarnings("ignore")
 from datetime import datetime
 
@@ -103,11 +182,10 @@ roms_path = '/pscratch/sd/b/bundzis/Beaufort_ROMS_2020_dvd_myroms_ice_scratch/Fo
 dsr = xr.open_dataset(roms_path)
 # Open bry file for temperature and select the top vertical level, need this for interpolation later
 path = '/pscratch/sd/b/bundzis/Beaufort_ROMS_2020_dvd_myroms_ice_scratch/Forcing_files/Bryclm/Attempt001/temp_bry_2019_2024_20vert_001_short.nc'
-dsr_temp = xr.open_dataset(path).isel(s_rho=-1)
+dsr_temp = xr.open_dataset(path).isel(s_rho=-1) # surface values! 
 
 path = '/pscratch/sd/b/bundzis/Beaufort_ROMS_2020_dvd_myroms_ice_scratch/Forcing_files/Bryclm/Attempt001/salt_bry_2019_2024_20vert_001_short.nc'
-dsr_salt = xr.open_dataset(path).isel(s_rho=-1)
-
+dsr_salt = xr.open_dataset(path).isel(s_rho=-1) # surface values
 
 # Open forcing file. We need this atmospheric temperature to fill in ice surface temperature
 # and internal ice temperature later.
@@ -121,6 +199,7 @@ ocean_time_aligned, temp_time_aligned, Tair_daily = align_times(dsr, dsr_temp, d
 dsr = dsr.sel(ocean_time=ocean_time_aligned)
 dsr_temp = dsr_temp.sel(temp_time=temp_time_aligned)
 
+print('Aligned ROMS frc and bry file times')
 # Tair_daily is already aligned and converted to daily
 # It has coords 'tair_time' matching the aligned period
 
@@ -134,8 +213,9 @@ grid_file = 'new_cice.grid.nc'
 ds_grid = xr.open_dataset(grid_file)
 
 # Horizontal dimensions from the grid
-eta_t_len = ds_grid.dims['eta_t']  # 206
-xi_t_len  = ds_grid.dims['xi_t']   # 608
+# 608 X by 206 Y
+eta_t_len = ds_grid.dims['eta_t'] 
+xi_t_len  = ds_grid.dims['xi_t']  
 
 # Other CICE-specific dimensions
 nkice_len = 7    # number of ice layers (example)
@@ -143,8 +223,11 @@ nksnow_len = 1   # number of snow layers (example)
 ncat_len = 5     # categories (example)
 ntime_len = len(dsr.ocean_time)    # start with one time step
 
+# Boundaries. In the beaufort, the southern boundary is closed!
 edges = ['E','N','W']
 
+# Create a generic dataset to hold CICE variables filled with NaNs or zeros.
+# Fill in values later
 bry_ds = xr.Dataset()
 
 # --- 4D ice layer variables (Sinz, Tinz) ---
@@ -221,6 +304,8 @@ for var in ['uvel','vvel']:
             attrs=vel_attrs
         )
 
+print('Created empty CICE boundary dataset structure')
+
 # Ice thickness category bounds, from Section 2 of 
 # https://gmd.copernicus.org/articles/15/4373/2022/
 cat_bounds = [0.00, 0.64, 1.39, 2.47, 4.57]
@@ -253,6 +338,8 @@ def assign_thickness_to_categories(h, ncat, cat_bounds):
 def assign_concentration_to_categories(aice, vicen_cat):
     """
     Distribute total ice concentration into thickness categories.
+    Since ice thickness and area fraction come from the same data source,
+    we can assign concentration in each category proportional to thickness.
     
     Parameters
     ----------
@@ -304,6 +391,8 @@ bry_ds['vicen_N_bry'][:, :, :] = vicen_north
 aice_north = dsr['Aice_north'].values
 bry_ds['aicen_N_bry'][:, :, :] = assign_concentration_to_categories(aice_north, vicen_north)
 
+print('Filled ice thickness and concentration variables')
+
 # =====================================================
 # CICE Ice Velocities (uvel, vvel)
 # ROMS values must be interpolated to CICE grid
@@ -351,7 +440,22 @@ u_north_cice[:, -1] = u_north[:, -1]
 bry_ds['uvel_N_bry'][:, :] = u_north_cice
 bry_ds['vvel_N_bry'][:, :] = v_north
 
-# East boundary
+print('Filled ice velocities')
+
+# =====================================================
+# CICE Surface Ice Temperature (Tsfc).
+# Use atmospheric temperature from forcing files
+# Grab the ROMS boundary points and interpolate Tair 
+# onto them using xesmf. This will be much faster than interpolating
+# the entire grid and then subsetting onto the boundary points.  
+# =====================================================
+
+# ---------------------------
+# East boundary (eta_t direction)
+# ---------------------------
+
+print('Starting interpolation for surface ice temperature...')
+
 lon_e = dsg.lon_rho[:, -1].values[:, np.newaxis]  # shape (206, 1)
 lat_e = dsg.lat_rho[:, -1].values[:, np.newaxis]  # shape (206, 1)
 
@@ -364,12 +468,15 @@ grid_e = xr.Dataset(
     }
 )
 
+# Recall we're using Tair that's been resampled to daily averages! 
 regridder_e = xe.Regridder(Tair_daily, grid_e, 'nearest_s2d', reuse_weights=False)
 Tair_e_line = regridder_e(Tair_daily)  # shape: (time, 206, 1)
 Tair_e_line = Tair_e_line[:, :, 0]      # squeeze to (time, 206)
 print("East shape",Tair_e_line.shape)
 
-# West boundary (first column) ---
+# ---------------------------
+# WEST boundary (eta_t direction)
+# ---------------------------
 lon_w = dsg.lon_rho[:, 0].values[:, np.newaxis]  # shape (206, 1)
 lat_w = dsg.lat_rho[:, 0].values[:, np.newaxis]  # shape (206, 1)
 
@@ -382,12 +489,14 @@ grid_w = xr.Dataset(
     }
 )
 
-regridder_e = xe.Regridder(Tair_daily, grid_w, 'nearest_s2d', reuse_weights=False)
-Tair_w_line = regridder_e(Tair_daily)  # shape: (time, 206, 1)
+regridder_w = xe.Regridder(Tair_daily, grid_w, 'nearest_s2d', reuse_weights=False)
+Tair_w_line = regridder_w(Tair_daily)  # shape: (time, 206, 1)
 Tair_w_line = Tair_w_line[:, :, 0]      # squeeze to (time, 206)
 print("West shape:", Tair_w_line.shape)
 
-# --- North boundary (last row) ---
+# ---------------------------
+# NORTH boundary (xi_t direction)
+# ---------------------------
 lon_n = dsg.lon_rho[-1, :].values[np.newaxis, :]  # shape (1, N)
 lat_n = dsg.lat_rho[-1, :].values[np.newaxis, :]
 
@@ -405,14 +514,15 @@ Tair_n_line = regridder_n(Tair_daily)  # shape: (time, 1, N)
 Tair_n_line = Tair_n_line[:, 0, :]     # squeeze to (time, N)
 print("North shape:", Tair_n_line.shape)
 
-# To double check that the boundaries are correct, you can run
+# To double check that the boundary indices are correct, you can run
 # plt.plot(lon_n[0,:],lat_n[0,:])
 # plt.plot(lon_w[:,0],lat_w[:,0])
 # plt.plot(lon_e[:,0],lat_e[:,0])
 
 # =====================================================
 # Now fill in surface ice temperatures. If Tair >= 0C, 
-# set to -0.00001C. Bullet point 3 of Sec. 2.2.2
+# set to -0.00001C. Bullet point 3 of Sec. 2.2.2. 
+# The ice can't be warmer than freezing!
 # =====================================================
 # East boundary (eta_t direction)
 Tair_e_clip = Tair_e_line.where(Tair_e_line < 0, -0.00001)
@@ -429,8 +539,10 @@ Tair_n_clip = Tair_n_line.where(Tair_n_line < 0, -0.00001)
 for i in range(ncat_len):
     bry_ds['Tsfc_N_bry'][:, i, :] = Tair_n_clip.values
 
+print('Ice temperatures filled')
 
 # =====================================================
+# Now for the more complicated 3D and 4D variables. 
 # From cice_bry.py! 
 # 
 # Additionally, atmosphere (from relevant model at corresponding times) and ocean (from
@@ -558,6 +670,10 @@ def generate_ice_bry_profiles(Tair_bry, Socn_bry, hsnow_bry, nkice):
     for side in Tair_bry.keys():
         Tair = np.array(Tair_bry[side])     # (Time, horizontal)
         Socn = np.array(Socn_bry[side])     # (Time, horizontal)
+
+        # The HYCOM files can have zero salinities. Sea ice can't have zero psu salinity,
+        # so we set a lower clip to 5. This needs testing! 
+        Socn = np.maximum(Socn, 5.0) # Set a lower bound of 5 psu
         hsnow = np.array(hsnow_bry[side])   # (Time, horizontal)
 
         nt, nh = Tair.shape
@@ -579,8 +695,7 @@ def generate_ice_bry_profiles(Tair_bry, Socn_bry, hsnow_bry, nkice):
                 Zi = z  # fractional depth (0 top, 1 bottom)
                 Sinz[t, :, i] = 19.539*Zi**2 - 19.93*Zi + 8.913
 
-                # Clip physically reasonable bounds
-                # -40C
+                # Clip physically reasonable bounds, -40C
                 Tinz[t, :, i] = np.clip(Tinz[t, :, i], -40, 0) 
                 # do not exceed ocean salinity, 1e-5 to prevent CICE's advection scheme 
                 # from possibly (idk if it is monotonic) creating false extrema
@@ -591,6 +706,8 @@ def generate_ice_bry_profiles(Tair_bry, Socn_bry, hsnow_bry, nkice):
         Sinz_bry[side] = Sinz
 
     return Tinz_bry, Sinz_bry
+
+print('Starting ice internal temperature and salinity profiles...')
 
 nkice_len = 7
 
@@ -644,8 +761,12 @@ for side, dim in zip(['E', 'W', 'N'], ['eta_t', 'eta_t', 'xi_t']):
     bry_ds[f'Tinz_{side}_bry'][:, :, :, :] = np.repeat(Tinz_full, ncat, axis=1)
     bry_ds[f'Sinz_{side}_bry'][:, :, :, :] = np.repeat(Sinz_full, ncat, axis=1)
 
+print('Finished ice internal temperature and salinity profiles...')
+
 # Last, but certaintly not least, we have snow temperature 
 # Set equal to ice temperature based on the paper
+
+print('Assigning snow temperature = to ice temperature...')
 
 # Number of snow layers
 nksnow = 1  
@@ -666,10 +787,91 @@ for side in ['E', 'W', 'N']:
     bry_ds[f'Tsnz_{side}_bry'][:, :, :, :] = Tsnz_full
 
 
+# Now, enforce the mask to the 4d variables. The other variables from HYCOM or set to zeros
+# are already masked implicitly. This needs to be QC'd.
+
+# Load the mask data
+maskHA = xr.open_dataarray("new_cice.kmt.nc")  # dims: eta_ha, xi_ha
+maskT_da = (maskHA > 0).astype(int)
+
+# Rename dimensions to match BRY variables. This assumes the indexing of the ha 
+# and t points match. Might be true... definetely double check this!
+maskT_da = maskT_da.rename({"eta_ha": "eta_t", "xi_ha": "xi_t"})
+
+# Convert the mask to a NumPy array (this strips the xarray dimension info)
+maskT_np = maskT_da.values  # Convert to numpy array
+
+# List of boundary variables
+bry_vars = [
+    'Sinz_E_bry', 'Sinz_N_bry', 'Sinz_W_bry',
+    'Tinz_E_bry', 'Tinz_N_bry', 'Tinz_W_bry',
+    'Tsnz_E_bry', 'Tsnz_N_bry', 'Tsnz_W_bry'
+]
+
+# Loop through boundary variables and apply the mask
+for var in bry_vars:
+    dims = bry_ds[var].dims
+    
+    if 'Sinz_E_bry' in var or 'Tinz_E_bry' in var or 'Tsnz_E_bry' in var:
+        # East boundary (xi_t dimension)
+        if 'eta_t' in dims and 'xi_t' not in dims:
+            # Only eta_t is present → apply a 1D mask along eta_t (for East boundary)
+            mask = maskT_np[:, -1]  # (eta_t,)
+            bry_ds[var] = bry_ds[var] * mask
+        elif 'xi_t' in dims and 'eta_t' not in dims:
+            # Only xi_t is present → apply a 1D mask along xi_t (for East boundary)
+            mask = maskT_np[0, :]  # (xi_t,)
+            bry_ds[var] = bry_ds[var] * mask
+        elif 'eta_t' in dims and 'xi_t' in dims:
+            # Both eta_t and xi_t are present → apply the full 2D mask
+            bry_ds[var] = bry_ds[var] * maskT_np
+        else:
+            raise ValueError(f"Unexpected dimensions for {var}: {dims}")
+    
+    elif 'Sinz_W_bry' in var or 'Tinz_W_bry' in var or 'Tsnz_W_bry' in var:
+        # West boundary (xi_t dimension)
+        if 'eta_t' in dims and 'xi_t' not in dims:
+            # Only eta_t is present → apply a 1D mask along eta_t (for West boundary)
+            mask = maskT_np[:, 0]  # (eta_t,) -- last xi_t for West boundary
+            bry_ds[var] = bry_ds[var] * mask
+        elif 'xi_t' in dims and 'eta_t' not in dims:
+            # Only xi_t is present → apply a 1D mask along xi_t (for West boundary)
+            mask = maskT_np[0, :]  # (xi_t,) -- first xi_t for West boundary
+            bry_ds[var] = bry_ds[var] * mask
+        elif 'eta_t' in dims and 'xi_t' in dims:
+            # Both eta_t and xi_t are present → apply the full 2D mask
+            bry_ds[var] = bry_ds[var] * maskT_np
+        else:
+            raise ValueError(f"Unexpected dimensions for {var}: {dims}")
+    
+    elif 'Sinz_N_bry' in var or 'Tinz_N_bry' in var or 'Tsnz_N_bry' in var:
+        # North boundary (eta_t dimension)
+        if 'eta_t' in dims and 'xi_t' not in dims:
+            # Only eta_t is present → apply a 1D mask along eta_t (for North boundary)
+            mask = maskT_np[-1, :]  # (xi_t,)
+            bry_ds[var] = bry_ds[var] * mask
+        elif 'xi_t' in dims and 'eta_t' not in dims:
+            # Only xi_t is present → apply a 1D mask along xi_t (for North boundary)
+            mask = maskT_np[-1, :]  # (xi_t,)
+            bry_ds[var] = bry_ds[var] * mask
+        elif 'eta_t' in dims and 'xi_t' in dims:
+            # Both eta_t and xi_t are present → apply the full 2D mask
+            bry_ds[var] = bry_ds[var] * maskT_np
+        else:
+            raise ValueError(f"Unexpected dimensions for {var}: {dims}")
+    
+    else:
+        raise ValueError(f"Boundary variable not recognized: {var}")
+
+# To do, update time once we know the format 
+
+print('Assigning metadata and variable attributes...')
+
 # Now create attributes for each variable in bry_ds
-# Base variables and theira placeholder attributes
+# Base variables and theira placeholder attributes. These may need to be updated
+# based on CICE documentation or the CICE equivalent of a varinfo file. 
 base_attrs = {
-    'aicen':  {'units': '',        'standard_name': 'sea_ice_area_fraction'},
+    'aicen':  {'units': '',       'standard_name': 'sea_ice_area_fraction'},
     'vicen':  {'units': 'm',      'standard_name': 'sea_ice_thickness'},
     'vsnon':  {'units': 'm',      'standard_name': 'snow_thickness'},
     'Tsfc':   {'units': 'degC',   'standard_name': 'sea_ice_surface_temperature'},
@@ -701,7 +903,7 @@ for base_var, attrs_dict in base_attrs.items():
 
 global_attrs = {
     'roms_grid': "CICE_b_grid_KakAKgrd_shelf_big010_smooth006_thin_sponge.nc",
-    'cice_grid': "KakAKgrd_shelf_big010_smooth006_thin_sponge.nc",
+    'cice_grid': "new_cice_grid.nc",
     'type': "CICE ",
     'history': "Created by Dylan Schlichting & Brianna Undzis",
     'Conventions': "CF",
