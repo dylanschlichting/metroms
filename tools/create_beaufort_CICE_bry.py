@@ -12,19 +12,23 @@
 # Based on Sec. 2.2.2 of Duarte et al. (2022) GMD,
 # https://gmd.copernicus.org/articles/15/4373/2022/
 # ==============================================================
-# CICE requires the following boundary variables: 
-# ==============================================
+# CICE requires the following boundary variables, sorted from 4D to 2D: 
+# ==============================================================
 # Sinz - ice salinity profile, 4D (Time, ncat, nkice, eta_t/xi_t)
-# Sthk - ice thickness, 4D (Time, ncat, nkice, eta_t/xi_t)
-# Uice - ice velocity (u-component), 4D (Time, ncat, nkice, eta_t/xi_t)
-# Vice - ice velocity (v-component), 4D (Time, ncat, nkice, eta_t/xi_t)
+# Tsnz - snow internal temperature profile, 4D (Time, ncat, nksnow, eta_t/xi_t)
 # Tinz - ice internal temperature profile, 4D (Time, ncat, nkice, eta_t/xi_t)
-# Tsfc - ice surface temperature, 4D (Time, ncat, nkice, eta_t/xi_t)
-# aicen - ice concentration in each thickness category, 4D (Time, ncat, nkice, eta_t/xi_t)
-# alvln - ice albedo, 4D (Time, ncat, nkice, eta_t/xi_t)
-# apondn - melt pond area fraction, 4D (Time, ncat, nkice, eta_t/xi_t)
-# hbrine - brine layer thickness, 4D (Time, ncat, nkice, eta_t/xi_t)
-# hpondn - melt pond thickness, 4D (Time, ncat, nkice, eta_t/xi_t)
+# Tsfc - ice surface temperature, 3D (Time, ncat, eta_t/xi_t)
+# aicen - ice concentration in each thickness category, 3D (Time, ncat, eta_t/xi_t)
+# vicen - volume per unit area of ice, 3D (Time, ncat, eta_t/xi_t)
+# alvln - concentration of level ice, 3D (Time, ncat, eta_t/xi_t)
+# apondn - melt pond fraction category , 3D (Time, ncat, nkice, eta_t/xi_t)
+# fbrine - This isn't labeled with a grep in the code!, 3D (Time, ncat, eta_t/xi_t)
+# hbrine - brine height, 3D (Time, ncat, eta_t/xi_t)
+# hpondn - melt pond depth category, 3D (Time, ncat, eta_t/xi_t)
+# vsnon - volume per unit area of snow, 3D (Time, ncat, eta_t/xi_t)
+# iage - ice age, 2D (Time, ncat, eta_t/xi_t)
+# Uvel - ice velocity (u-component), 2D (Time, eta_t/xi_t)
+# Vvel - ice velocity (v-component), 2D (Time, eta_t/xi_t)
 # 
 # Missing data (most of it!):
 # - No data available for ice or snow internal/surface temperatures
